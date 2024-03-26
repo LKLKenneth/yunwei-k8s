@@ -1,0 +1,1159 @@
+### 部署elk集群+kafka+zk集群
+
+[(22条消息) kubernetes上部署ELK集群_你说亮不亮的博客-CSDN博客_k8s部署elk](https://blog.csdn.net/weixin_43334786/article/details/122435701)
+
+#### 1 部署es集群
+
+##### 1.1 构建es镜像
+
+```shell
+[root@k8s-master1 dockerfile]# vim elasticsearch.yml
+cluster.name: "docker-cluster"
+network.host: 0.0.0.0
+xpack.security.enabled: "true"
+xpack.security.transport.ssl.enabled: "true"
+xpack.security.transport.ssl.verification_mode : certificate
+xpack.security.transport.ssl.certificate_authorities : /usr/share/elasticsearch/config/certs/ca.crt
+xpack.security.transport.ssl.certificate: /usr/share/elasticsearch/config/certs/tls.crt
+xpack.security.transport.ssl.key: /usr/share/elasticsearch/config/certs/tls.key
+#xpack.security.http.ssl.enabled : true
+#xpack.security.http.ssl.certificate :  /usr/share/elasticsearch/config/certs/tls.crt
+#xpack.security.http.ssl.key :  /usr/share/elasticsearch/config/certs/tls.key
+
+# cat dockerfile/Dockerfile-es 
+FROM elasticsearch:7.6.2
+ADD elasticsearch.yml  /usr/share/elasticsearch/config/
+
+[root@k8s-master1 dockerfile]# docker build -f Dockerfile-es -t core.harbor.domain/test/elasticsearch:7.6.2 .
+docker push core.harbor.domain/test/elasticsearch:7.6.2
+```
+
+
+
+##### 2.创建es服务
+
+```shell
+1.创建自签证书,并创建k8s的secret资源对象
+mkdir crt && cd crt
+openssl req -x509 -sha256 -nodes -newkey rsa:4096 -days 365 -subj "/CN=quickstart-es-http" -addext "subjectAltName=DNS:quickstart-es-http.devops.svc" -keyout tls.key -out tls.crt
+kubectl create secret -n devops generic quickstart-es-cert --from-file=ca.crt=tls.crt --from-file=tls.crt=tls.crt --from-file=tls.key=tls.key
+
+2.创建es-svc和sts服务
+[root@k8s-master1 elk-7.6]# cat elasticsearch-sts.yaml 
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: elasticsearch
+  namespace: devops
+  labels:
+    app: elasticsearch
+spec:
+  selector:
+    app: elasticsearch
+  type: NodePort
+  ports:
+    - port: 9200
+      targetPort: 9200
+      nodePort: 31920
+      name: rest
+    - port: 9300
+      targetPort: 9300
+      name: inter-node
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch-master
+  namespace: devops
+spec:
+  serviceName: elasticsearch
+  replicas: 3
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels: 
+        app: elasticsearch
+    spec:
+      imagePullSecrets:
+        - name: harbor
+      schedulerName: default-scheduler
+      initContainers:
+      - name: increase-vm-max-map
+        image: core.harbor.domain/test/busybox:1.28
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            memory: 2Gi
+            cpu: 1.0
+          limits:
+            memory: 4Gi
+            cpu: 2.0
+        command: ["sysctl", "-w", "vm.max_map_count=262144"]
+        securityContext:
+          privileged: true
+      - name: increase-fd-ulimit
+        image: core.harbor.domain/test/busybox:1.28
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "ulimit -n 65536"]
+        securityContext:
+          privileged: true
+      containers:
+      - name: elasticsearch
+        image: core.harbor.domain/test/elasticsearch:7.6.2
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: rest
+          containerPort: 9200
+        - name: inter
+          containerPort: 9300
+        volumeMounts:
+        - name: es-master-data
+          mountPath: /usr/share/elasticsearch/data
+        - name: ca
+          mountPath: /usr/share/elasticsearch/config/certs
+        env:
+        - name: cluster.name
+          value: k8s-logs
+        - name: node.name
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: cluster.initial_master_nodes
+          value: "elasticsearch-master-0,elasticsearch-master-1,elasticsearch-master-2"
+        - name: discovery.zen.minimum_master_nodes
+          value: "2"
+        - name: discovery.seed_hosts
+          value: "elasticsearch"
+        - name: ES_JAVA_OPTS
+          value: "-Xms2g -Xmx2g"
+        - name: network.host
+          value: "0.0.0.0"
+      volumes:
+      - name: ca
+        secret:
+          secretName: quickstart-es-cert   
+  volumeClaimTemplates:
+  - metadata:
+      name: es-master-data
+      labels:
+        app: elasticsearch
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: managed-nfs-storage
+      resources:
+        requests:
+          storage: 15Gi 
+
+[root@k8s-master1 elk-7.6]# kubectl apply -f elasticsearch-sts.yaml 
+[root@k8s-master1 elk-7.6]# kubectl get po -n devops -owide
+NAME   READY   STATUS    RESTARTS   AGE   IP               NODE        NOMINATED NODE   READINESS GATES
+es-0   1/1     Running   0          81s   10.244.169.164   k8s-node2   <none>           <none>
+es-1   1/1     Running   0          77s   10.244.169.165   k8s-node2   <none>           <none>
+es-2   1/1     Running   0          70s   10.244.169.166   k8s-node2   <none>           <none>
+
+# 查看es挂载存储
+[root@k8s-master1 elk-7.6]# ls /data/nfs/ |grep devops-data-es
+log-prod-data-es-0-pvc-da9679e3-aa38-4a6d-8d1c-2b45dc184361
+log-prod-data-es-1-pvc-8ddcb036-b06e-4fee-a402-31554fd44150
+log-prod-data-es-2-pvc-79f1da6e-6c24-4793-af1c-2ac94f8401e1
+
+3.创建es-ingress
+[root@k8s-master1 elk-7.6]# cat elasticsearch-ing.yaml
+kind: Ingress
+apiVersion: extensions/v1beta1
+metadata:
+  name: elasticseach
+  namespace: devops
+  labels:
+    app: elasticseach
+  annotations: {}
+spec:
+  rules:
+  - host: elastic.es.com
+    http:
+      paths:
+      - path: /
+        backend:
+          serviceName: elasticsearch
+          servicePort: 9200
+
+[root@k8s-master1 elk-7.6]# kubectl apply -f elasticsearch-ing.yaml
+[root@k8s-master1 elk-7.6]# kubectl get ing -n devops
+NAME           CLASS    HOSTS            ADDRESS   PORTS   AGE
+elasticseach   <none>   elastic.es.com             80      3m41s
+
+esstic我们已经创建好了，并且需要使用账号密码认证才能去使用，但是呢，还没有初始化账号
+4.初始化账号，设置es密码
+# kubectl exec -it -n devops  elasticsearch-master-0  --  bash
+[root@es-0 elasticsearch]# bin/elasticsearch-setup-passwords interactive
+Please confirm that you would like to continue [y/N]y
+密码全部123456
+    账号密码：elastic  123456
+
+5.使用接口创建用户（需要进入pod操作）
+curl -X POST -u elastic:123456 "localhost:9200/_security/user/huangrunda?pretty" -H 'Content-Type: application/json' -d'
+{
+  "password" : "123456",
+  "roles" : [ "yjhl" ],
+  "full_name" : "刘某某",
+  "email" : "huangrunda@123.com",
+  "metadata" : {
+    "intelligence" : 7
+  }
+}
+'
+
+6.更改接口密码（需要进入pod操作）
+curl -u elastic:$password -X POST "localhost:9200/_security/user/elastic/_password?pretty" -H 'Content-Type: application/json' -d'
+{
+  "password" : "1234567"
+}
+'
+相关文档https://www.elastic.co/guide/en/elasticsearch/reference/current/security-api.html#security-user-apis
+
+访问：
+http://elastic.es.com
+账号密码：elastic ：123456
+```
+
+
+
+```shell
+6.安装goolge Chrome elasticsearch-head插件（浏览器直接访问模式）
+推荐博客：
+https://blog.csdn.net/qq_33849593/article/details/109464339
+所需包位置：
+D:\A-技术专区\A-开发项目压缩包\ELK常用压缩包\ELK-7.6.2 版本所需包\es-head-master谷歌插件
+点击扩展程序，打开elasticsearch-head插件
+```
+
+![image-20220707154642271](E:/A-常用工作技术文档/A-k8s项目地址/A-k8s-部署应用集群/k8s部署多应用集群服务大全.assets/image-20220707154642271.png)
+
+```shell
+输入 ingress域名即可访问
+```
+
+
+
+#### 2 部署kibane
+
+```shell
+kubectl -n devops create secret generic elasticsearch-password --from-literal password=123456 
+
+# cat kibana-deploy.yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  namespace: devops
+  name: kibana-config
+  labels:
+    app: kibana
+data:
+  kibana.yml: |-
+    server.name: kibana
+    server.host: "0.0.0.0"
+    elasticsearch.hosts: [ "http://elasticsearch:9200" ]
+    xpack.monitoring.ui.container.elasticsearch.enabled: true
+    server.port: 5601
+    kibana.index: ".kibana"
+    elasticsearch.username: "elastic"
+    elasticsearch.password: "123456"
+    i18n.locale: "zh-CN"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: devops
+  labels:
+    app: kibana
+spec:
+  selector:
+    app: kibana
+  type: NodePort
+  ports:
+  - port: 5601
+    protocol: TCP
+    targetPort: 5601
+    name: http
+    nodePort: 30802
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: devops
+  labels:
+    app: kibana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      containers:
+      - name: kibana
+        image: docker.elastic.co/kibana/kibana:7.6.2 
+        imagePullPolicy: IfNotPresent
+        resources:
+          limits:
+            cpu: 1000m
+          requests:
+            cpu: 100m
+        ports:
+        - containerPort: 5601
+        volumeMounts:
+        - name: kibana-config
+          mountPath: /usr/share/kibana/config/kibana.yml
+          readOnly: true
+          subPath: kibana.yml
+      volumes:
+      - name: kibana-config
+        configMap:
+          name: kibana-config
+
+kubectl apply -f kibana-deploy.yaml
+
+
+```
+
+
+
+
+
+#### 3  helm部署zk+kafka集群
+
+参考链接：
+
+https://blog.csdn.net/weixin_42507440/article/details/122481913
+
+```shell
+helm pull bitnami/zookeeper
+helm pull bitnami/kafka
+
+1.安装zookeeper
+# 部署zookeeper，选择storageClass
+helm install -n devops zookeeper bitnami/zookeeper --set persistence.storageClass=managed-nfs-storage,persistence.size=1Gi,replicaCount=3
+# 导出模板
+helm template  -n devops  zookeeper bitnami/zookeeper --set persistence.storageClass=managed-nfs-storage,persistence.size=1Gi,replicaCount=3 -f ./zookeeper/values.yaml > zookeeper-sts.yaml
+# 卸载
+helm uninstall -n devops zookeeper
+
+NAME: zookeeper
+LAST DEPLOYED: Fri Jul  8 16:36:20 2022
+NAMESPACE: devops
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+CHART NAME: zookeeper
+CHART VERSION: 10.0.1
+APP VERSION: 3.8.0
+
+** Please be patient while the chart is being deployed **
+
+ZooKeeper can be accessed via port 2181 on the following DNS name from within your cluster:
+
+    zookeeper.devops.svc.cluster.local
+
+To connect to your ZooKeeper server run the following commands:
+
+    export POD_NAME=$(kubectl get pods --namespace devops -l "app.kubernetes.io/name=zookeeper,app.kubernetes.io/instance=zookeeper,app.kubernetes.io/component=zookeeper" -o jsonpath="{.items[0].metadata.name}")
+    kubectl exec -it $POD_NAME -- zkCli.sh
+
+To connect to your ZooKeeper server from outside the cluster execute the following commands:
+
+    kubectl port-forward --namespace devops svc/zookeeper 2181:2181 &
+    zkCli.sh 127.0.0.1:2181
+
+# kubectl get po -A |grep zooke
+devops        zookeeper-0                                  1/1     Running   0          32s
+devops        zookeeper-1                                  1/1     Running   0          32s
+devops        zookeeper-2                                  1/1     Running   0          32s
+
+
+2.安装kafka
+# 导出模板
+helm template  -n devops   kafkar bitnami/kafka  --set zookeeper.enabled=false --set replicaCount=3  --set externalZookeeper.servers=zookeeper.devops.svc.cluster.local --set persistence.storageClass=managed-nfs-storage -f ./kafka/values.yaml > zookeeper-sts.yaml
+# helm部署应用
+helm install -n devops kafka bitnami/kafka --set zookeeper.enabled=false --set replicaCount=3 --set externalZookeeper.servers=zookeeper.devops.svc.cluster.local --set persistence.storageClass=managed-nfs-storage
+# 卸载
+helm uninstall -n devops kafka
+
+stence.storageClass=managed-nfs-storage
+NAME: kafka
+LAST DEPLOYED: Fri Jul  8 16:48:31 2022
+NAMESPACE: devops
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+CHART NAME: kafka
+CHART VERSION: 18.0.3
+APP VERSION: 3.2.0
+
+** Please be patient while the chart is being deployed **
+
+Kafka can be accessed by consumers via port 9092 on the following DNS name from within your cluster:
+
+    kafka.devops.svc.cluster.local
+
+Each Kafka broker can be accessed by producers via port 9092 on the following DNS name(s) from within your cluster:
+
+    kafka-0.kafka-headless.devops.svc.cluster.local:9092
+    kafka-1.kafka-headless.devops.svc.cluster.local:9092
+    kafka-2.kafka-headless.devops.svc.cluster.local:9092
+
+To create a pod that you can use as a Kafka client run the following commands:
+
+    kubectl run kafka-client --restart='Never' --image docker.io/bitnami/kafka:3.2.0-debian-11-r12 --namespace devops --command -- sleep infinity
+    kubectl exec --tty -i kafka-client --namespace devops -- bash
+
+    PRODUCER:
+        kafka-console-producer.sh \
+            
+            --broker-list kafka-0.kafka-headless.devops.svc.cluster.local:9092,kafka-1.kafka-headless.devops.svc.cluster.local:9092,kafka-2.kafka-headless.devops.svc.cluster.local:9092 \
+            --topic test
+
+    CONSUMER:
+        kafka-console-consumer.sh \
+            
+            --bootstrap-server kafka.devops.svc.cluster.local:9092 \
+            --topic test \
+            --from-beginning
+
+
+
+3.zookeeper测试
+kubectl get pods --namespace devops -l "app.kubernetes.io/name=zookeeper,app.kubernetes.io/instance=zookeeper,app.kubernetes.io/component=zookeeper" -o jsonpath="{.items[0].metadata.name}"
+
+export POD_NAME=$(kubectl get pods --namespace devops -l "app.kubernetes.io/name=zookeeper,app.kubernetes.io/instance=zookeeper,app.kubernetes.io/component=zookeeper" -o jsonpath="{.items[0].metadata.name}")
+
+kubectl exec -it $POD_NAME -n devops -- zkCli.sh      #可以查看zk中相关的目录
+  
+4.kafka测试
+kubectl run kafka-client --restart='Never' --image docker.io/bitnami/kafka:2.8.1-debian-10-r73 --namespace devops --command -- sleep infinity
+kubectl get pod -n devops |grep kafka 
+kubectl exec --tty -i kafka-client --namespace devops -- bash
+
+PRODUCER:
+cd /opt/bitnami/kafka/bin/kafka-console-producer.sh
+
+kafka-console-producer.sh  --broker-list kafka-0.kafka-headless.devops.svc.cluster.local:9092,kafka-1.kafka-headless.devops.svc.cluster.local:9092,kafka-2.kafka-headless.devops.svc.cluster.local:9092  --topic test
+
+CONSUMER
+kafka-console-consumer.sh  --bootstrap-server kafka.devops.svc.cluster.local:9092   --topic test    --from-beginning
+  
+>xiaofei
+>
+  
+xiaofei
+
+[root@k8s-master1 test]# kubectl exec --tty -i zookeeper-0 --namespace devops -- bash
+I have no name!@zookeeper-0:/$ zkCli.sh
+[zk: localhost:2181(CONNECTED) 0] ls /
+[admin, brokers, cluster, config, consumers, controller, controller_epoch, feature, isr_change_notification, latest_producer_id_block, log_dir_event_notification, zookeeper]
+[zk: localhost:2181(CONNECTED) 2] ls /consumers
+[]
+[zk: localhost:2181(CONNECTED) 3] ls /brokers/topics
+[__consumer_offsets, test]
+
+
+5.kafka-manager安装
+helm repo add stable http://mirror.azure.cn/kubernetes/charts
+helm search repo kafka-manager
+helm fetch stable/kafka-manager
+cat >> kafka-manager-values.yaml <<EOF
+image:
+  repository: cce.zhanghsn/com/zhanghsn/kafka-manager
+  tag: 1.3.3.22
+zkHosts: zookeeper:2181
+basicAuth:
+  enabled: true
+  username: admin
+  password: admin
+ingress:
+  enabled: true
+  hosts:
+   - km.hongda.com
+EOF
+
+helm install  --namespace devops kafka-manager -f kafka-manager-values.yaml stable/kafka-manager
+helm uninstall  --namespace devops kafka-manager
+kubectl get pod,svc,ing -n devops  |grep kafka
+```
+
+
+
+
+
+[kubernetes之StatefulSet部署zk和kafka - 大胖猴 - 博客园 (cnblogs.com)](https://www.cnblogs.com/xzkzzz/p/10833304.html)
+
+```shell
+[root@k8s-master1 zookeeper-kafka]# cat zookeeper-sts.yaml 
+# 创建service服务
+apiVersion: v1
+kind: Service
+metadata:
+  # DNS would be like zookeeper.zoons
+  name: zookeeper
+  namespace: devops
+  labels:
+    app: zookeeper
+spec:
+  ports:
+    - port: 2181
+      name: client
+    - port: 7000
+      name: prometheus
+  selector:
+    app: zookeeper
+    what: node
+---
+# 创建headless服务
+apiVersion: v1
+kind: Service
+metadata:
+  # DNS would be like zookeeper-0.zookeeper-headless.etc
+  name: zookeeper-headless
+  namespace: devops
+  labels:
+    app: zookeeper
+spec:
+  ports:
+    - port: 2888
+      name: server
+    - port: 3888
+      name: leader-election
+  clusterIP: None
+  selector:
+    app: zookeeper
+    what: node
+---
+# 创建PodDisruptionBudget 控制器
+# Pod Disruption Budget (pod 中断 预算) 简称PDB，含义其实是终止pod前通过 labelSelector 机制获取正常运行的pod数目的限制，目的是对自愿中断的保护措施
+apiVersion: policy/v1beta1
+kind: PodDisruptionBudget
+metadata:
+  name: zookeeper-pod-disruption-budget
+  namespace: devops
+spec:
+  selector:
+    matchLabels:
+      app: zookeeper
+  maxUnavailable: 1
+---
+# 部署zookeeper集群
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  # nodes would be named as zookeeper-0, zookeeper-1, zookeeper-2
+  name: zookeeper
+  namespace: devops
+spec:
+  selector:
+    matchLabels:
+      app: zookeeper
+  serviceName: zookeeper-headless
+  replicas: 3
+  updateStrategy:
+    type: RollingUpdate
+  podManagementPolicy: Parallel
+  template:
+    metadata:
+      labels:
+        app: zookeeper
+        what: node
+      annotations:
+        prometheus.io/port: '7000'
+        prometheus.io/scrape: 'true'
+    spec:
+#      pod亲和性topologyKey
+#      affinity:
+#        podAntiAffinity:
+#          requiredDuringSchedulingIgnoredDuringExecution:
+#            - labelSelector:
+#                matchExpressions:
+#                  - key: "app"
+#                    operator: In
+#                    values:
+#                      - zookeeper
+#              topologyKey: "kubernetes.io/hostname"
+      containers:
+        - name: zookeeper
+          imagePullPolicy: IfNotPresent
+          image: "core.harbor.domain/test/zookeeper:3.8.0"
+          resources:
+            requests:
+              memory: "500Mi"
+              cpu: "0.5"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          ports:
+            - containerPort: 2181
+              name: client
+            - containerPort: 2888
+              name: server
+            - containerPort: 3888
+              name: leader-election
+            - containerPort: 7000
+              name: prometheus
+          command:
+            - bash
+            - -x
+            - -c
+            - |
+              SERVERS=3 &&
+              HOST=`hostname -s` &&
+              DOMAIN=`hostname -d` &&
+              CLIENT_PORT=2181 &&
+              SERVER_PORT=2888 &&
+              ELECTION_PORT=3888 &&
+              PROMETHEUS_PORT=7000 &&
+              ZOO_DATA_DIR=/var/lib/zookeeper/data &&
+              ZOO_DATA_LOG_DIR=/var/lib/zookeeper/datalog &&
+              {
+                echo "clientPort=${CLIENT_PORT}"
+                echo 'tickTime=2000'
+                echo 'initLimit=300'
+                echo 'syncLimit=10'
+                echo 'maxClientCnxns=2000'
+                echo 'maxSessionTimeout=60000000'
+                echo "dataDir=${ZOO_DATA_DIR}"
+                echo "dataLogDir=${ZOO_DATA_LOG_DIR}"
+                echo 'autopurge.snapRetainCount=10'
+                echo 'autopurge.purgeInterval=1'
+                echo 'preAllocSize=131072'
+                echo 'snapCount=3000000'
+                echo 'leaderServes=yes'
+                echo 'standaloneEnabled=false'
+                echo '4lw.commands.whitelist=*'
+                echo 'metricsProvider.className=org.apache.zookeeper.metrics.prometheus.PrometheusMetricsProvider'
+                echo "metricsProvider.httpPort=${PROMETHEUS_PORT}"
+              } > /conf/zoo.cfg &&
+              {
+                echo "zookeeper.root.logger=CONSOLE"
+                echo "zookeeper.console.threshold=INFO"
+                echo "log4j.rootLogger=\${zookeeper.root.logger}"
+                echo "log4j.appender.CONSOLE=org.apache.log4j.ConsoleAppender"
+                echo "log4j.appender.CONSOLE.Threshold=\${zookeeper.console.threshold}"
+                echo "log4j.appender.CONSOLE.layout=org.apache.log4j.PatternLayout"
+                echo "log4j.appender.CONSOLE.layout.ConversionPattern=%d{ISO8601} [myid:%X{myid}] - %-5p [%t:%C{1}@%L] - %m%n"
+              } > /conf/log4j.properties &&
+              echo 'JVMFLAGS="-Xms128M -Xmx4G -XX:+UseG1GC -XX:+CMSParallelRemarkEnabled"' > /conf/java.env &&
+              if [[ $HOST =~ (.*)-([0-9]+)$ ]]; then
+                  NAME=${BASH_REMATCH[1]}
+                  ORD=${BASH_REMATCH[2]}
+              else
+                  echo "Failed to parse name and ordinal of Pod"
+                  exit 1
+              fi &&
+              mkdir -p ${ZOO_DATA_DIR} &&
+              mkdir -p ${ZOO_DATA_LOG_DIR} &&
+              export MY_ID=$((ORD+1)) &&
+              echo $MY_ID > $ZOO_DATA_DIR/myid &&
+              for (( i=1; i<=$SERVERS; i++ )); do
+                  echo "server.$i=$NAME-$((i-1)).$DOMAIN:$SERVER_PORT:$ELECTION_PORT" >> /conf/zoo.cfg;
+              done &&
+              chown -Rv zookeeper "$ZOO_DATA_DIR" "$ZOO_DATA_LOG_DIR" "$ZOO_LOG_DIR" "$ZOO_CONF_DIR" &&
+              zkServer.sh start-foreground
+          readinessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - "OK=$(echo ruok | nc 127.0.0.1 2181); if [[ \"$OK\" == \"imok\" ]]; then exit 0; else exit 1; fi"
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - "OK=$(echo ruok | nc 127.0.0.1 2181); if [[ \"$OK\" == \"imok\" ]]; then exit 0; else exit 1; fi"
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/zookeeper
+      # Run as a non-privileged user
+     # securityContext:
+     #   runAsUser: 1000
+     #   fsGroup: 1000
+     # imagePullSecrets:
+     #   - name: k8s.jyy        
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: zookeeper
+      spec:
+        accessModes:
+          - ReadWriteMany
+        storageClassName: "managed-nfs-storage"
+        resources:
+          requests:
+            storage: 2Gi
+
+kubectl apply -f zookeeper-sts.yaml
+
+
+验证zk集群
+for i in 0 1 2; do kubectl exec -n devops zookeeper-$i -- hostname; done
+zookeeper-0
+zookeeper-1
+zookeeper-2
+
+for i in 0 1 2; do echo "myid zookeeper-$i";kubectl exec -n devops  zookeeper-$i -- cat /var/lib/zookeeper/data/myid; done
+myid zookeeper-0
+1
+myid zookeeper-1
+2
+myid zookeeper-2
+3
+
+for i in 0 1 2; do kubectl exec  -n devops zookeeper-$i -- hostname -f; done
+zookeeper-0.zookeeper-headless.devops.svc.cluster.local
+zookeeper-1.zookeeper-headless.devops.svc.cluster.local
+zookeeper-2.zookeeper-headless.devops.svc.cluster.local
+
+```
+
+
+
+##### helm部署方式
+
+```shell
+helm search hub kafka
+
+helm pull bitnami/kafka
+helm pull bitnami/zookeeper
+
+# 部署指定storageclass
+helm install -n devops zookeeper zookeeper --set persistence.storageClass=managed-nfs-storage,persistence.size=1Gi,replicaCount=3
+# 普通部署
+helm install -f zookeeper/values.yaml --name zookeeper-cluster zookeeper --namespace devops
+# 卸载
+helm uninstall zookeeper -n devops
+
+	
+```
+
+
+
+#### 4 部署filebeat服务
+
+```shell
+docker pull docker.elastic.co/beats/filebeat:7.14.0
+docker tag  docker.elastic.co/beats/filebeat:7.14.0  core.harbor.domain/test/filebeat:7.14.0
+docker push core.harbor.domain/test/filebeat:7.14.0
+
+[root@k8s-master1 filebeat]# cat filebeat-sts.yaml 
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # 参考：https://www.elastic.co/guide/en/beats/filebeat/current/running-on-kubernetes.html
+  name: filebeat-config
+  namespace: devops
+  labels:
+    k8s-app: filebeat
+data:
+  filebeat.yml: |-
+    filebeat.inputs:
+    - type: container
+      paths:
+        - '/var/lib/docker/containers/*/*.log'
+      processors:
+        - add_kubernetes_metadata:
+            host: ${NODE_NAME}
+            matchers:
+            - logs_path:
+                logs_path: "/var/lib/docker/containers/"
+
+    # To enable hints based autodiscover, remove `filebeat.inputs` configuration and uncomment this:
+    #filebeat.autodiscover:
+    #  providers:
+    #    - type: kubernetes
+    #      node: ${NODE_NAME}
+    #      hints.enabled: true
+    #      hints.default_config:
+    #        type: container
+    #        paths:
+    #          - /var/log/containers/*${data.kubernetes.container.id}.log
+
+    processors:
+      - add_cloud_metadata:
+      - add_host_metadata:
+
+    # 参考：https://www.elastic.co/guide/en/beats/filebeat/current/kafka-output.html
+    output:
+      kafka:
+        enabled: true
+        hosts: ["kafka.devops.svc.cluster.local:9092"]
+        topic: filebeat
+        max_message_bytes: 5242880
+        partition.round_robin:
+          reachable_only: true
+        keep-alive: 120
+        required_acks: 1
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: filebeat
+  namespace: devops
+  labels:
+    k8s-app: filebeat
+spec:
+  selector:
+    matchLabels:
+      k8s-app: filebeat
+  template:
+    metadata:
+      labels:
+        k8s-app: filebeat
+    spec:
+      serviceAccountName: filebeat
+      terminationGracePeriodSeconds: 30
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+      - name: filebeat
+        image: docker.elastic.co/beats/filebeat:7.14.0
+        imagePullPolicy: IfNotPresent
+        args: [
+          "-c", "/etc/filebeat.yml",
+          "-e",
+        ]
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        securityContext:
+          runAsUser: 0
+          # If using Red Hat OpenShift uncomment this:
+          #privileged: true
+        resources:
+          limits:
+            memory: 200Mi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        volumeMounts:
+        - name: config
+          mountPath: /etc/filebeat.yml
+          readOnly: true
+          subPath: filebeat.yml
+        - name: data
+          mountPath: /usr/share/filebeat/data
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          defaultMode: 0640
+          name: filebeat-config
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+      # data folder stores a registry of read status for all files, so we don't send everything again on a Filebeat pod restart
+      - name: data
+        hostPath:
+          # When filebeat runs as non-root user, this directory needs to be writable by group (g+w).
+          path: /var/lib/filebeat-data
+          type: DirectoryOrCreate
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: filebeat
+subjects:
+- kind: ServiceAccount
+  name: filebeat
+  namespace: devops
+roleRef:
+  kind: ClusterRole
+  name: filebeat
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: filebeat
+  namespace: devops
+subjects:
+  - kind: ServiceAccount
+    name: filebeat
+    namespace: devops
+roleRef:
+  kind: Role
+  name: filebeat
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: filebeat-kubeadm-config
+  namespace: devops
+subjects:
+  - kind: ServiceAccount
+    name: filebeat
+    namespace: devops
+roleRef:
+  kind: Role
+  name: filebeat-kubeadm-config
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: filebeat
+  labels:
+    k8s-app: filebeat
+rules:
+- apiGroups: [""] # "" indicates the core API group
+  resources:
+  - namespaces
+  - pods
+  - nodes
+  verbs:
+  - get
+  - watch
+  - list
+- apiGroups: ["apps"]
+  resources:
+    - replicasets
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: filebeat
+  # should be the namespace where filebeat is running
+  namespace: devops
+  labels:
+    k8s-app: filebeat
+rules:
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: filebeat-kubeadm-config
+  namespace: devops
+  labels:
+    k8s-app: filebeat
+rules:
+  - apiGroups: [""]
+    resources:
+      - configmaps
+    resourceNames:
+      - kubeadm-config
+    verbs: ["get"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: filebeat
+  namespace: devops
+  labels:
+    k8s-app: filebeat
+
+# kubectl apply -f filebeat-sts.yaml
+
+# kubectl get po -A -l  k8s-app=filebeat
+devops      filebeat-9zw2x   1/1     Running   0          5m6s
+devops      filebeat-bsbcx   1/1     Running   0          5m6s
+devops      filebeat-k2qq8   1/1     Running   0          5m6s
+devops      filebeat-v2frd   1/1     Running   0          5m6s
+```
+
+![image-20220709111006137](E:/A-常用工作技术文档/A-k8s项目地址/A-k8s-部署应用集群/k8s部署多应用集群服务大全.assets/image-20220709111006137.png)
+
+
+
+#### 5 部署 logstach
+
+```shell
+docker pull docker.elastic.co/logstash/logstash:7.14.0
+docker tag  docker.elastic.co/logstash/logstash:7.14.0  core.harbor.domain/test/logstash:7.14.0
+docker push core.harbor.domain/test/logstash:7.14.0
+
+cat > logstach-deploy.yaml <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-configmap
+  namespace: devops
+data:
+  logstash.yml: |
+    http.host: "0.0.0.0"
+    path.config: /usr/share/logstash/pipeline
+  logstash.conf: |
+    # 参考：https://www.elastic.co/guide/en/logstash/current/plugins-inputs-kafka.html
+    input {
+      kafka {
+        bootstrap_servers => "kafka.devops.svc.cluster.local:9092"
+        topics => ["filebeat"]
+        # 保留容器日志的 json 格式
+        codec => "json"
+      }
+    }
+    filter {
+      date {
+        match => [ "timestamp" , "dd/MMM/yyyy:HH:mm:ss Z" ]
+      }
+    }
+      # 参考：https://www.elastic.co/guide/en/logstash/current/plugins-outputs-elasticsearch.html
+      output {
+        elasticsearch {
+          hosts => ["elasticsearch:9200"]
+          user => "elastic"
+          password => "123456"
+          # 参考：https://discuss.elastic.co/t/separate-indexes-for-each-kubernetes-namespace/169131/3
+          # 根据 kubernetes.pod.name 字段单独创建 pod 的索引
+          index => "%{[kubernetes][pod][name]}-%{+YYYY.MM.dd}"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash-deployment
+  namespace: devops
+spec:
+  selector:
+    matchLabels:
+      app: logstash
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: logstash
+    spec:
+      containers:
+      - name: logstash
+        image: core.harbor.domain/test/logstash:7.14.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5044
+        volumeMounts:
+          - name: config-volume
+            mountPath: /usr/share/logstash/config
+          - name: logstash-pipeline-volume
+            mountPath: /usr/share/logstash/pipeline
+          - mountPath: /etc/localtime
+            name: localtime
+      volumes:
+      - name: config-volume
+        configMap:
+          name: logstash-configmap
+          items:
+            - key: logstash.yml
+              path: logstash.yml
+      - name: logstash-pipeline-volume
+        configMap:
+          name: logstash-configmap
+          items:
+            - key: logstash.conf
+              path: logstash.conf
+      - hostPath:
+          path: /etc/localtime
+        name: localtime
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: logstash-service
+  namespace: devops
+spec:
+  selector:
+    app: logstash
+  ports:
+  - protocol: TCP
+    port: 5044
+    targetPort: 5044
+EOF
+
+# kubectl -n ns-elk apply -f logstach-deploy.yaml
+
+```
+
+![image-20220710130645607](E:/A-常用工作技术文档/A-k8s项目地址/A-k8s-部署应用集群/k8s部署多应用集群服务大全.assets/image-20220710130645607.png)
+
+新建索引模式：
+
+logstash*
+
+![image-20220710131757659](E:/A-常用工作技术文档/A-k8s项目地址/A-k8s-部署应用集群/k8s部署多应用集群服务大全.assets/image-20220710131757659.png)
+
+![image-20220710131829437](E:/A-常用工作技术文档/A-k8s项目地址/A-k8s-部署应用集群/k8s部署多应用集群服务大全.assets/image-20220710131829437.png)
+
+![image-20220710131842742](E:/A-常用工作技术文档/A-k8s项目地址/A-k8s-部署应用集群/k8s部署多应用集群服务大全.assets/image-20220710131842742.png)
+
+
+
+![image-20220710132445274](E:/A-常用工作技术文档/A-k8s项目地址/A-k8s-部署应用集群/k8s部署多应用集群服务大全.assets/image-20220710132445274.png)
+
+#### 6 创建es索引
+
+```shell
+1.查看所有索引
+GET /_cat/indices?v
+
+2.查询es集群节点
+GET /_cat/nodes?v
+
+3.查看集群是否启动成功
+curl 'http://10.2.7.24:9200/?pretty'
+
+4.随机查询某索引10条数据，并且可以看到该索引总数据量
+get hy_enterprise/_search
+
+
+GET _all/_settings       //查看素有索引的设置
+ 
+GET /index_1/_settings   //单独查询某个索引的设置
+
+5.查看集群健康状态
+GET /_cluster/health
+
+6.创建索引，并指定配置
+PUT index_2        
+{
+  "settings":{
+    "index":{
+      "number_of_shards":4,    //分片数
+      "number_of_replicas":0   //备份数
+    }
+  }
+}
+
+POST indexname/_doc/id/_update
+{
+  "settings": {              #设置
+     "number_of_shards": 5     #几个分片，默认为5
+     , "number_of_replicas": 1   #分片里面几个备份，默认是1，复本数量1
+  }
+}
+
+```
+
+
+
