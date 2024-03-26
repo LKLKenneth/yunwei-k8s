@@ -1,0 +1,13 @@
+nacos 2.2.3默认不带鉴权功能
+开启鉴权需要添加以下配置：
+            - name: NACOS_AUTH_ENABLE
+              value: "true"
+            - name: NACOS_AUTH_TOKEN
+              value: "SecretKey012345678901234567890123456789012345678901234567890123456789"
+            - name: NACOS_AUTH_IDENTITY_KEY
+              value: "nacos"
+            - name: NACOS_AUTH_IDENTITY_VALUE
+              value: "nacos"
+
+
+###开启鉴权（参照文档）https://nacos.io/zh-cn/docs/v2/guide/user/auth.html
