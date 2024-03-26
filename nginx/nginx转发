@@ -1,0 +1,87 @@
+##访问www.tinggo360.com转发到test.interface.flight.21kv.com;
+upstream auth-gateway {
+        server 121.40.181.93:8888;
+}
+
+upstream flights {
+        #server test.interface.flight.21kv.com;
+         server 127.0.0.1:802;
+}
+
+server {
+    listen 802;
+      location / {
+        proxy_pass http://test.interface.flight.21kv.com;
+      }
+}
+server {
+    listen      80;
+    listen     443 ssl;
+    server_name www.tinggo360.com;
+    #将domain name.pem替换成您证书的文件名
+    ssl_certificate /usr/local/nginx/ssl/www.tinggo360.com.pem;
+    #将domain name.key替换成您证书的密钥文件名   
+    ssl_certificate_key /usr/local/nginx/ssl/www.tinggo360.com.key;
+    ssl_session_timeout 5m;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE:ECDH:AES:HIGH:!NULL:!aNULL:!MD5:!ADH:!RC4;
+    ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
+    ssl_prefer_server_ciphers on;
+    error_log       logs/proxy_api_error.log;
+    location / {
+            root   /work/tinggo/dist;
+            index  index.html index.htm index login;
+            error_log       logs/tinggo_static_error.log;
+            access_log       logs/tinggo_static_access.log;
+            try_files $uri $uri/ /index.html last;
+    }
+    location ~ ^/tinggo/api/ {
+            proxy_set_header Host $http_host;
+            proxy_pass_header Server;
+            proxy_pass_header X-Custom-Header;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header REMOTE-HOST $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_pass http://127.0.0.1:801;      # 可以用服务器ip代替
+    }
+
+#Nginx 反向代理 去除 路径匹配规则url
+    location ~ ^/flights/ {
+            proxy_pass http://127.0.0.1:802;      # 可以用服务器ip代替
+            proxy_set_header Host $http_host;
+            proxy_pass_header Server;
+            proxy_pass_header X-Custom-Header;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header REMOTE-HOST $remote_addr;
+            rewrite ^/flights/(.*)$ /$1 break;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+#举例比如前端调用的地址为：http://localhost:8080/api/user/login
+location ~* ^/(api) {
+       proxy_connect_timeout 15s;
+       proxy_send_timeout 15s;
+       proxy_read_timeout 15s;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto http;
+       proxy_pass http://localhost:8080;
+    }
+##以上的配置会带有/api路径但我们不想要/api，应该配置为
+location ~* ^/(api) {
+       proxy_connect_timeout 15s;
+       proxy_send_timeout 15s;
+       proxy_read_timeout 15s;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto http;
+       rewrite ^/api/(.*)$ /$1 break;
+       proxy_pass http://localhost:8080;
+    }
+#https://blog.csdn.net/A_yonga/article/details/125236208?ops_request_misc=&request_id=1159488f40ea4d7e9dfaa7d6cba83314&biz_id=&utm_medium=distribute.pc_search_result.none-task-blog-2~all~koosearch~default-1-125236208-null-null.142%5Ev90%5Einsert_down28v1,239%5Ev2%5Einsert_chatgpt&utm_term=nginx%20%E5%8F%8D%E5%90%91%E4%BB%A3%E7%90%86%E5%8E%BB%E6%8E%89api&spm=1018.2226.3001.4187
+
+; nginx报错处理
+
+; Mixed Content: The page at 'https://www.tinggo360.com/hotelHome' was loaded over HTTPS, but requested an insecure image 'http://sz.cnbooking.net/uploadorder/201711/bf1c60f0-a2e1-4644-98b1-4dba383066e2.png'. This request has been blocked; the content must be served over 
+; HTTPS.
+; 处理方法：
+; 在配置文件中添加：
+add_header Content-Security-Policy upgrade-insecure-requests
