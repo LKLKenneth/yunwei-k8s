@@ -1,0 +1,48 @@
+socat端口转发（socat和tmux）
+#install
+```
+yum install tmux 
+tmux new-session -s <name> 比如1433
+socat TCP4-LISTEN:1433,fork TCP4:118.178.180.120:3306
+; #监听1433端口转发
+; mq 转发
+; 把 118.178.93.39 3306 测试数据库端口流量 转发到118.178.180.120 docker启动的数据库 3306 上
+; 5672和15672都设置下转发
+
+docker stop 82e06427f649
+netstat -lntp | grep 5672
+
+tmux a -t mq-5672-proxy
+socat TCP4-LISTEN:5672,fork TCP4:118.178.180.120:5672
+tmux a -t  mq-15672-proxy
+socat 
+
+socat TCP4-LISTEN:6379,fork TCP4:118.178.180.120:6379
+socat TCP4-LISTEN:16379,fork TCP4:118.178.180.120:16379
+socat TCP4-LISTEN:26379,fork TCP4:118.178.180.120:26379
+
+; windows端口转发
+# 新增
+netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=1433 connectaddress=IP_OR_DOMAIN_NAME connectport=1433
+
+# 查看
+netsh interface portproxy show v4tov4
+
+# 删除
+netsh interface portproxy delete v4tov4 listenaddress=0.0.0.0 listenport=1433
+
+#查看是否启动成功
+netstat -ano | find listenport
+#显示系统中的转发规则列表
+netsh interface portproxy show all
+#查看portproxy设置
+netsh interface portproxy dump 
+#清除所有端口转发规则
+netsh interface portproxy reset
+#示例：
+netstat -ano|findstr 1432
+netstat -ano|findstr 1433
+telnet 120.27.133.160 1433
+netsh interface portproxy show v4tov4
+netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=1432 connectaddress=120.27.133.160 connectport=1433
+netsh interface portproxy delete v4tov4 listenaddress=0.0.0.0 listenport=1432

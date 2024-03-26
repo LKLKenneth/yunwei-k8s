@@ -1,0 +1,31 @@
+; Service ClusterIP 是如何分配的？
+; 当 Kubernetes 需要为 Service 分配虚拟 IP 地址时，该分配会通过以下两种方式之一进行：
+; 动态分配
+; 集群的控制面自动从所配置的 IP 范围内为 type: ClusterIP 选择一个空闲 IP 地址。
+; 静态分配
+; 根据为 Service 所配置的 IP 范围，选定并设置你的 IP 地址。
+; 在整个集群中，每个 Service 的 ClusterIP 都必须是唯一的。 尝试使用已分配的 ClusterIP 创建 Service 将返回错误。
+  clusterIP: 10.103.197.71
+  clusterIPs:
+  - 10.103.197.71
+; 静态分配指定虚拟ip：示例
+apiVersion: v1
+kind: Service
+metadata:
+  name: yunwei
+  namespace: lklnacos
+  labels:
+    app: team-nav
+spec:
+  clusterIP: 10.103.197.71
+  clusterIPs:
+  - 10.103.197.71
+  ports:
+    - port: 8080
+      name: server
+      targetPort: 8080
+      nodePort: 30336
+  selector:
+    app: team-nav
+  sessionAffinity: None
+  type: NodePort
