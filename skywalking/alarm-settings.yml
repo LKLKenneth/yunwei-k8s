@@ -1,0 +1,96 @@
+rules:
+  # Rule unique name, must be ended with `_rule`.
+  #kubectl create configmap skywalking-config --from-file=application.yml --from-file=alarm-settings.yml --from-file=trace-sampling-policy-settings.yml -n skywalking
+  service_resp_time_rule:
+    metrics-name: service_resp_time
+    op: ">"
+    threshold: 10000
+    period: 10
+    count: 2
+    silence-period: 10
+    message: 服务【{name}】的平均响应时间在最近10分钟内有2分钟超过10s
+  service_sla_rule:
+    # Metrics value need to be long, double or int
+    metrics-name: service_sla
+    op: "<"
+    threshold: 8000
+    # The length of time to evaluate the metrics
+    period: 10
+    # How many times after the metrics match the condition, will trigger alarm
+    count: 2
+    # How many times of checks, the alarm keeps silence after alarm triggered, default as same as period.
+    silence-period: 6
+    message: 服务【{name}】的成功率在最近10分钟内有2分钟低于80％
+  service_resp_time_percentile_rule:
+    # Metrics value need to be long, double or int
+    metrics-name: service_percentile
+    op: ">"
+    threshold: 10000,10000,10000,10000,10000
+    period: 10
+    count: 3
+    silence-period: 5
+    message: 服务【{name}】90%响应时间在最近3分钟内高于10s
+  service_instance_resp_time_rule:
+    metrics-name: service_instance_resp_time
+    op: ">"
+    threshold: 10000
+    period: 10
+    count: 2
+    silence-period: 5
+    message: 服务【{name}】实例在最近2分钟内的平均响应时间超过10s
+  database_access_resp_time_rule:
+    metrics-name: database_access_resp_time
+    threshold: 5000
+    op: ">"
+    period: 10
+    count: 2
+    message: 数据库访问【{name}】的响应时间在最近10分钟内有2分钟内超过5s
+  endpoint_relation_resp_time_rule:
+    metrics-name: endpoint_relation_resp_time
+    threshold: 10000
+    op: ">"
+    period: 10
+    count: 2
+    message: 端点关系【{name}】的响应时间在最近10分钟内有2分钟内超过10s
+  unhealthy_event_rule:
+    metrics-name: Unhealthy
+    #健康检查通常是一项计划任务，
+    #它们最初几次可能是不健康的，
+    #并且由于网络抖动偶尔可能是不健康的，
+    #请根据您的实际情况调整阈值。
+    threshold: 3
+    op: ">"
+    period: 5
+    count: 1
+    message: 实例:【{name}】已不正常运行5分钟
+  instance_jvm_old_gc_count_rule:
+    metrics-name: instance_jvm_old_gc_count
+    threshold: 1
+    op: ">"
+    period: 10
+    count: 1
+    message: 实例:【{name}】 指标:OldGC次数 告警:最近10分钟内>=2
+  instance_jvm_young_gc_count_rule:
+    metrics-name: instance_jvm_young_gc_count
+    threshold: 99
+    op: ">"
+    # 时间窗口
+    period: 5
+    # 在一个周期窗口中统计次数
+    count: 1
+    message: 实例:【{name}】 指标:YoungGC次数 告警:最近5分钟内>=100
+
+  endpoint_resp_time_rule:
+    metrics-name: endpoint_resp_time
+    op: ">"
+    threshold: 10000
+    period: 10
+    count: 2
+    silence-period: 5
+    message: 接口【{name}】的响应时间在过去10分钟的2分钟内超过10s
+
+webhooks:
+  - http://10.255.126.228:31215/sw/alarm/notify
+#  - http://10.200.20.234:8080/sw/alarm/notify
+#  - http://127.0.0.1/go-wechat/
+

@@ -1,0 +1,174 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: skywalking-oap
+  name: skywalking-oap
+  namespace: skywalking
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: skywalking-oap
+  template:
+    metadata:
+      labels:
+        app: skywalking-oap
+    spec:
+      containers:
+        - image: 172.23.101.176/ops/skywalking-oap-server:9.5.0
+          imagePullPolicy: IfNotPresent
+          name: skywalking
+          ports:
+            - containerPort: 12800
+              name: http
+              protocol: TCP
+            - containerPort: 11800
+              name: grpc
+              protocol: TCP
+          resources:
+            limits:
+              cpu: '4'
+              memory: 8Gi
+            requests:
+              cpu: '1'
+              memory: 4Gi
+          volumeMounts:
+            - name: config-application
+              mountPath: /skywalking/config/application.yml
+              subPath: application.yml
+            - name: config-settings
+              mountPath: /skywalking/config/alarm-settings.yml
+              subPath: alarm-settings.yml
+            - name: config-trace
+              mountPath: /skywalking/config/trace-sampling-policy-settings.yml
+              subPath: trace-sampling-policy-settings.yml
+            - mountPath: /etc/localtime
+              name: volume-oap
+      tolerations:
+        - key: "node/roles"
+          operator: "Equal"
+          value: "operat"
+          effect: "NoSchedule"
+      volumes:
+        - name: config-application
+          configMap:
+            name: skywalking-config
+            items:
+              - key: application.yml
+                path: application.yml
+        - name: config-settings
+          configMap:
+            name: skywalking-config
+            items:
+              - key: alarm-settings.yml
+                path: alarm-settings.yml
+        - name: config-trace
+          configMap:
+            name: skywalking-config
+            items:
+              - key: trace-sampling-policy-settings.yml
+                path: trace-sampling-policy-settings.yml
+        - hostPath:
+            path: /etc/localtime
+            type: ''
+          name: volume-oap
+
+
+#OAP-Service.yml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: skywalking-oap-service
+  namespace: skywalking
+  labels:
+    app: skywalking-oap-service
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 12800
+      protocol: TCP
+      targetPort: 12800
+      nodePort: 31280
+    - name: grpc
+      port: 11800
+      protocol: TCP
+      targetPort: 11800
+      nodePort: 31180
+  selector:
+    app: skywalking-oap
+
+#UI-Deployment.yml
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: skywalking-ui
+  name: skywalking-ui
+  namespace: skywalking
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: skywalking-ui
+  template:
+    metadata:
+      labels:
+        app: skywalking-ui
+    spec:
+      containers:
+        - env:
+            - name: SW_OAP_ADDRESS
+              value: "http://skywalking-oap-service.skywalking.svc.cluster.local:12800"
+          image: 172.23.101.176/ops/skywalking-ui:9.5.0
+          imagePullPolicy: IfNotPresent
+          name: skywalking-ui
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          resources:
+            limits:
+              cpu: '2'
+              memory: 4Gi
+            requests:
+              cpu: '1'
+              memory: 1Gi
+          volumeMounts:
+            - mountPath: /etc/localtime
+              name: volume-ui
+      tolerations:
+        - key: "node/roles"
+          operator: "Equal"
+          value: "operat"
+          effect: "NoSchedule"
+      volumes:
+        - hostPath:
+            path: /etc/localtime
+            type: ''
+          name: volume-ui
+
+#UI-Service.yml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: skywalking-ui-service
+  namespace: skywalking
+  labels:
+    app: skywalking-ui-service
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      nodePort: 30002
+  selector:
+    app: skywalking-ui
+
+

@@ -1,0 +1,8 @@
+apiVersion: v1
+data:
+  .dockerconfigjson: eyJhdXRocyI6eyIxNzIuMjMuMTAxLjE3NiI6eyJ1c2VybmFtZSI6ImRldmVudiIsInBhc3N3b3JkIjoiSG9tZWlubnMxMjM0NTYiLCJhdXRoIjoiWkdWMlpXNTJPa2h2YldWcGJtNXpNVEl6TkRVMiJ9fX0=
+kind: Secret
+metadata:
+  name: registry-pull-secret-2th
+  namespace: observability
+type: kubernetes.io/dockerconfigjson

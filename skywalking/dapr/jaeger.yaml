@@ -1,0 +1,25 @@
+apiVersion: jaegertracing.io/v1
+kind: Jaeger
+metadata:
+  name: jaeger-collector
+  namespace: observability
+spec:
+  strategy: production
+  collector:
+    maxReplicas: 3
+    resources:
+      limits:
+        cpu: 500m
+        memory: 2G
+  storage:
+    type: elasticsearch
+    options:
+      es:
+        server-urls: http://elasticsearch.observability.svc.cluster.local:9200
+    esIndexCleaner:
+      enabled: true
+    #  image: jaegertracing/jaeger-es-index-cleaner
+      numberOfDays: 2        
+      schedule: "0 23 * * *"        
+  ingress:
+    enabled: false      
