@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-cluster-config
+  namespace: redis-cluster
+data:
+  redis-cluster.conf: |
+    daemonize no
+    supervised no
+    protected-mode no
+    bind 0.0.0.0
+    port 6379
+    cluster-announce-bus-port 16379
+    cluster-enabled yes
+    appendonly yes
+    cluster-node-timeout 5000
+    dir /data
+    cluster-config-file /data/nodes.conf
+    pidfile /data/redis.pid
+    loglevel notice
+    logfile /data/redis_log
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cluster-service
+  namespace: redis-cluster
+spec:
+  selector:
+    app: redis-cluster
+  clusterIP: None
+  ports:
+    - name: redis-6379
+      port: 6379
+    - name: redis-16379
+      port: 16379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cluster-service-access
+  namespace: redis-cluster
+spec:
+  selector:
+    app: redis-cluster
+  type: NodePort
+  sessionAffinity: None
+  ports:
+    - name: redis-6379
+      port: 6379
+      targetPort: 6379
+      nodePort: 30202
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app: redis-cluster
+  name: redis-cluster
+  namespace: redis-cluster
+spec:
+  serviceName: redis-cluster-service
+  replicas: 6
+  selector:
+    matchLabels:
+      app: redis-cluster
+  template:
+    metadata:
+      labels:
+        app: redis-cluster
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: redis
+          image: redis:6.2.6
+          imagePullPolicy: IfNotPresent
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          command: [ "redis-server", "/etc/redis/redis-cluster.conf" ]
+          args:
+            - "--cluster-announce-ip"
+            - "$(POD_IP)"
+          env:
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: TZ
+              value: "Asia/Shanghai"
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+            - name: cluster
+              containerPort: 16379
+              protocol: TCP
+          volumeMounts:
+            - name: redis-conf
+              mountPath: /etc/redis
+            - name: pvc-data
+              mountPath: /data
+      volumes:
+        - name: timezone
+          hostPath:
+            path: /usr/share/zoneinfo/Asia/Shanghai
+        - name: redis-conf
+          configMap:
+            name: redis-cluster-config
+            items:
+              - key: redis-cluster.conf
+                path: redis-cluster.conf
+  volumeClaimTemplates:
+    - metadata:
+        name: pvc-data
+        namespace: redis-cluster
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 5G
+        accessModes:
+        - ReadWriteOnce                           #访问模式为RWO
+        storageClassName: "rook-ceph-block"      #指定使用的存储类，实现动态分配pv

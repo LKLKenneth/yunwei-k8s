@@ -1,0 +1,37 @@
+kind: Service
+apiVersion: v1
+metadata:
+  labels:
+    app: rmq-cluster
+  name: rmq-cluster
+  namespace: rabbitmq
+spec:
+  clusterIP: None
+  ports:
+  - name: amqp
+    port: 5672
+    targetPort: 5672
+  selector:
+    app: rmq-cluster
+---
+kind: Service
+apiVersion: v1
+metadata:
+  labels:
+    app: rmq-cluster
+    type: LoadBalancer
+  name: rmq-cluster-balancer
+  namespace: rabbitmq
+spec:
+  ports:
+  - name: http
+    port: 15672
+    protocol: TCP
+    targetPort: 15672
+  - name: amqp
+    port: 5672
+    protocol: TCP
+    targetPort: 5672
+  selector:
+    app: rmq-cluster
+  type: NodePort
